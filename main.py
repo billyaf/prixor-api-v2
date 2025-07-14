@@ -1,4 +1,4 @@
-# main.py (Versi Debugging Lanjutan)
+# main.py (Versi Final - Lazy Initialization)
 import os
 import json
 from fastapi import FastAPI, HTTPException
@@ -6,66 +6,62 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from pydantic import BaseModel
 
+# Variabel global untuk menampung koneksi database.
+# Dimulai dengan None, akan diinisialisasi pada permintaan pertama.
 db = None
-# Variabel ini akan menyimpan pesan diagnostik
-DIAGNOSTIC_MESSAGE = "Proses inisialisasi belum dimulai."
 
-def initialize_database():
-    global db, DIAGNOSTIC_MESSAGE
+def initialize_firebase():
+    """
+    Fungsi untuk menginisialisasi koneksi Firebase.
+    Hanya akan berjalan jika koneksi belum ada.
+    """
+    global db
+    # Jika db sudah ada isinya (dari permintaan sebelumnya), hentikan fungsi.
+    if db is not None:
+        return
+
+    print("--- Mencoba inisialisasi koneksi Firebase... ---")
     try:
-        DIAGNOSTIC_MESSAGE = "Langkah 1: Mencoba membaca environment variable 'FIREBASE_CREDENTIALS'."
+        # Coba ambil kredensial dari environment variable (untuk Vercel)
         service_account_str = os.getenv('FIREBASE_CREDENTIALS')
+        if service_account_str:
+            service_account_info = json.loads(service_account_str)
+            print("Menginisialisasi dari Environment Variable...")
+        else:
+            # Jika tidak ada, coba dari file lokal (untuk development)
+            with open('serviceAccountKey.json') as f:
+                service_account_info = json.load(f)
+            print("Menginisialisasi dari file lokal...")
 
-        if not service_account_str:
-            DIAGNOSTIC_MESSAGE = "GAGAL di Langkah 1: Environment variable 'FIREBASE_CREDENTIALS' tidak ditemukan atau kosong. Aplikasi akan berhenti."
-            print(DIAGNOSTIC_MESSAGE)
-            return
-
-        DIAGNOSTIC_MESSAGE = f"Langkah 2: Berhasil membaca env var. Panjang karakter: {len(service_account_str)}. Mencoba parsing JSON."
-        print(DIAGNOSTIC_MESSAGE)
-        service_account_info = json.loads(service_account_str)
-
-        DIAGNOSTIC_MESSAGE = "Langkah 3: Berhasil parsing JSON. Mencoba membuat kredensial."
-        print(DIAGNOSTIC_MESSAGE)
-        cred = credentials.Certificate(service_account_info)
-
-        DIAGNOSTIC_MESSAGE = "Langkah 4: Berhasil membuat kredensial. Mencoba inisialisasi Firebase App."
-        print(DIAGNOSTIC_MESSAGE)
         if not firebase_admin._apps:
+            cred = credentials.Certificate(service_account_info)
             firebase_admin.initialize_app(cred)
 
-        DIAGNOSTIC_MESSAGE = "Langkah 5: Berhasil inisialisasi App. Mencoba mendapatkan klien Firestore."
-        print(DIAGNOSTIC_MESSAGE)
         db = firestore.client()
-
-        DIAGNOSTIC_MESSAGE = "--- SEMUA LANGKAH BERHASIL. KONEKSI DATABASE SUKSES. ---"
-        print(DIAGNOSTIC_MESSAGE)
-
+        print("--- KONEKSI DATABASE BERHASIL ---")
     except Exception as e:
-        # Jika ada error di langkah mana pun, kita akan menangkapnya di sini.
-        error_detail = f"Error pada '{DIAGNOSTIC_MESSAGE}' - Detail: {str(e)}"
-        DIAGNOSTIC_MESSAGE = error_detail
-        print(f"--- KONEKSI DATABASE GAGAL: {DIAGNOSTIC_MESSAGE} ---")
+        print(f"--- KONEKSI DATABASE GAGAL: {e} ---")
         db = None
 
-app = FastAPI(on_startup=[initialize_database])
+# Buat aplikasi FastAPI tanpa event startup
+app = FastAPI(title="API Deteksi Harga Produk")
 
 class Product(BaseModel):
     name: str; price: int; description: str; product_id: str
 
 @app.get("/")
 def read_root():
-    # Endpoint ini sekarang akan melaporkan status terakhir dari proses inisialisasi.
-    return {
-        "status": "OK" if db else "ERROR", 
-        "database_connected": db is not None,
-        "diagnostic_message": DIAGNOSTIC_MESSAGE
-    }
+    # Selalu coba inisialisasi saat endpoint ini diakses
+    initialize_firebase()
+    return {"status": "OK" if db else "ERROR", "database_connected": db is not None}
 
 @app.get("/api/products/{product_id}", response_model=Product)
 def get_product_by_id(product_id: str):
+    # Selalu coba inisialisasi saat endpoint ini diakses
+    initialize_firebase()
+
     if db is None:
-        raise HTTPException(status_code=503, detail="Layanan database tidak tersedia.")
+        raise HTTPException(status_code=503, detail="Layanan database tidak tersedia karena gagal inisialisasi.")
     try:
         doc_ref = db.collection('products').document(product_id).get()
         if doc_ref.exists:
